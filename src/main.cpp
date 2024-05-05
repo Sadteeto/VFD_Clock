@@ -108,6 +108,15 @@ void loop() {
     //all done in tasks
 }
 
+/**
+ * @brief Task function for updating the VFD display.
+ * 
+ * This task is responsible for updating the VFD display by transmitting data through SPI.
+ * It continuously loops through the segment digits and transmits the data using the SPI device.
+ * It also takes a semaphore to ensure exclusive access to the VFD data and releases it after transmission.
+ * 
+ * @param pvParameters Pointer to task parameters (not used in this task).
+ */
 void vVfdUpdateTask(void *pvParameters) {
     uint32_t segmentDigits_local[8];
     Serial.println("vfdUpdateTask started");
@@ -134,6 +143,14 @@ void vVfdUpdateTask(void *pvParameters) {
 }
 
 
+/**
+ * @brief Task function for GPS data processing.
+ * 
+ * This task reads GPS data from Serial1 and extracts the time information from the GNGGA sentence.
+ * The extracted time is then formatted as HH-MM-SS and passed to the processString function.
+ * 
+ * @param pvParameters Pointer to task parameters (not used in this task).
+ */
 void vGpsTask(void *pvParameters) {
     Serial.println("vGpsTask started");
     while (1) {
@@ -226,6 +243,11 @@ void clearScreen(){
 }
 
 
+/**
+ * Processes a string and assigns segment values to each digit.
+ *
+ * @param input The input string to process.
+ */
 void processString(const char *input) {
     if (strlen(input) != 8) {
         printf("Error: String must be exactly 8 characters long.\n");
