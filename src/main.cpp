@@ -49,11 +49,7 @@ void setup() {
     Serial1.begin(38400, SERIAL_8N1, GPSTX, GPSRX);
     Serial.println("Hello World");
 
-
-
-
     // setup spi bus
-
     spi_bus_config_t buscfg = {
         .mosi_io_num = VFDOUT,     // MOSI pin number
         .miso_io_num = -1,    // MISO not used
@@ -64,7 +60,6 @@ void setup() {
     };
     // Initialize the SPI bus
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
-
 
     spi_device_interface_config_t devcfg = {
         .command_bits = 0,
@@ -80,7 +75,6 @@ void setup() {
     Serial.println("SPI configured");
 
     clearScreen();
-
 
     xaccessVfdDataSemaphore = xSemaphoreCreateBinary();
     xSemaphoreGive(xaccessVfdDataSemaphore);
@@ -107,6 +101,7 @@ void setup() {
 void loop() {
     //all done in tasks
 }
+
 
 /**
  * @brief Task function for updating the VFD display.
@@ -185,6 +180,7 @@ void vGpsTask(void *pvParameters) {
     }
 }
 
+
 /**
  * Returns the segment value to show on a display for a given character.
  *
@@ -227,6 +223,7 @@ uint32_t getSegmentShow(char c) {
         default:  return SEGMENT_SHOW_NONE;
     }
 }
+
 
 /**
  * Clears the screen of the VFD display.

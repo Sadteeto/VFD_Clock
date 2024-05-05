@@ -57,8 +57,3 @@
 #define SEGMENT_SHOW_Z  (SEGMENT_A | SEGMENT_B | SEGMENT_D | SEGMENT_E | SEGMENT_G)                    // Z
 #define SEGMENT_SHOW_DASH (SEGMENT_G)                                                                 // -
 #define SEGMENT_SHOW_NONE 0
-
-
-
-
-
