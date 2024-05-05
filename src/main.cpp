@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-// // put function declarations here:
+#include <FreeRTOS.h>
 
 
 
@@ -22,11 +22,9 @@ static spi_transaction_t empty_screen = {
 
 spi_device_handle_t vfdspi;
 
-// SemaphoreHandle_t xaccessVfdDataSemaphore = NULL;
+SemaphoreHandle_t xaccessVfdDataSemaphore = NULL;
 // SemaphoreHandle_t xspiSemaphore = NULL;
 
-// void vGpsTask(void *pvParameters);
-// void vVfdUpdateTask(void *pvParameters);
 // void displayDigit(uint8_t digit, uint8_t value);
 // void spi_transaction_complete(spi_transaction_t *t);
 
@@ -36,75 +34,139 @@ spi_device_handle_t vfdspi;
 uint32_t getSegmentShow(char c);
 void clearScreen(void);
 void processString(const char *input);
+void vGpsTask(void *pvParameters);
+void vVfdUpdateTask(void *pvParameters);
 
 
 
 
 
 void setup() {
-  // set vf pins as output
-  pinMode(VFLOAD, OUTPUT);
-  pinMode(VFBLANK, OUTPUT);
-  Serial.begin(115200);
-  Serial.println("Hello World");
-
-//   xaccessVfdDataSemaphore = xSemaphoreCreateBinary();
-//   xspiSemaphore = xSemaphoreCreateBinary();
+    // set vf pins as output
+    pinMode(VFLOAD, OUTPUT);
+    pinMode(VFBLANK, OUTPUT);
+    Serial.begin(115200);
+    Serial1.begin(38400, SERIAL_8N1, GPSTX, GPSRX);
+    Serial.println("Hello World");
 
 
-  // setup spi bus
-
-  spi_bus_config_t buscfg = {
-      .mosi_io_num = VFDOUT,     // MOSI pin number
-      .miso_io_num = -1,    // MISO not used
-      .sclk_io_num = VFCLK,     // SCK pin number
-      .quadwp_io_num = -1,  // Not used
-      .quadhd_io_num = -1,  // Not used
-      .max_transfer_sz = 0  // Default transfer size
-  };
-  // Initialize the SPI bus
-  ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
 
-  spi_device_interface_config_t devcfg = {
-      .command_bits = 0,
-      .address_bits = 0,
-      .mode = 0,                    // SPI mode 0
-      .clock_speed_hz = SPI_MASTER_FREQ_8M, //APB_CLK_FREQ/80,  // Clock speed in Hz (10 kHz)
-      .spics_io_num = -1,           // CS pin (not used in this example)
-      .queue_size = 7,              // Transactions queue size
-  };
+    // setup spi bus
 
-  // Add device to the bus
-  ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &vfdspi));
-  Serial.println("SPI configured");
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = VFDOUT,     // MOSI pin number
+        .miso_io_num = -1,    // MISO not used
+        .sclk_io_num = VFCLK,     // SCK pin number
+        .quadwp_io_num = -1,  // Not used
+        .quadhd_io_num = -1,  // Not used
+        .max_transfer_sz = 0  // Default transfer size
+    };
+    // Initialize the SPI bus
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-  clearScreen();
+
+    spi_device_interface_config_t devcfg = {
+        .command_bits = 0,
+        .address_bits = 0,
+        .mode = 0,                    // SPI mode 0
+        .clock_speed_hz = SPI_MASTER_FREQ_8M, //APB_CLK_FREQ/80,  // Clock speed in Hz (10 kHz)
+        .spics_io_num = -1,           // CS pin (not used in this example)
+        .queue_size = 7,              // Transactions queue size
+    };
+
+    // Add device to the bus
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &vfdspi));
+    Serial.println("SPI configured");
+
+    clearScreen();
+
+
+    xaccessVfdDataSemaphore = xSemaphoreCreateBinary();
+    xSemaphoreGive(xaccessVfdDataSemaphore);
+    xTaskCreatePinnedToCore(
+        vGpsTask, /* Function to implement the task */
+        "gpsTask", /* Name of the task */
+        2048,  /* Stack size in words */
+        NULL,  /* Task input parameter */
+        2,  /* Priority of the task */
+        NULL,  /* Task handle. */
+        0); /* Core where the task should run */
+
+    xTaskCreatePinnedToCore(
+        vVfdUpdateTask, /* Function to implement the task */
+        "vfdTask", /* Name of the task */
+        2048,  /* Stack size in words */
+        NULL,  /* Task input parameter */
+        3,  /* Priority of the task */
+        NULL,  /* Task handle. */
+        1); /* Core where the task should run */
 }
 
 
 void loop() {
-    counter ++;
-    char buffer[9];  
-    sprintf(buffer, "%08ld", counter);
-
-    processString(buffer);
-
-    for (int i = 0; i < 8; i++) {
-        spi_transaction_t t = {
-            .length = 32,         // Number of bits to transmit
-            .tx_buffer = &segmentDigits[i],   // Data buffer
-            .rx_buffer = NULL     // No data to be received
-        };
-
-        if (spi_device_transmit(vfdspi, &t) != ESP_OK) {
-            Serial.println("Error");
-        }
-        digitalWrite(VFLOAD, HIGH);
-        digitalWrite(VFLOAD, LOW);
-    }
+    //all done in tasks
 }
 
+void vVfdUpdateTask(void *pvParameters) {
+    uint32_t segmentDigits_local[8];
+    Serial.println("vfdUpdateTask started");
+    while (1) {
+        for (int i = 0; i < 8; i++) {
+            spi_transaction_t t = {
+                .length = 32,         // Number of bits to transmit
+                .tx_buffer = &segmentDigits[i],   // Data buffer
+                .rx_buffer = NULL     // No data to be received
+            };
+            // take semaphore, transmit data, release semaphore
+            if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
+                if (spi_device_transmit(vfdspi, &t) != ESP_OK) {
+                    Serial.println("Error");
+                }
+                xSemaphoreGive(xaccessVfdDataSemaphore);
+            }
+
+            digitalWrite(VFLOAD, HIGH);
+            digitalWrite(VFLOAD, LOW);
+        }
+    }
+
+}
+
+
+void vGpsTask(void *pvParameters) {
+    Serial.println("vGpsTask started");
+    while (1) {
+        char gpsbuffer[300] = {0};  // Initialize buffer and ensure it's zeroed out
+        char time[10];  // Buffer to hold extracted time
+        char formattedTime[9];  // Buffer to hold formatted time
+
+        if (Serial1.available()) {
+            int len = Serial1.readBytesUntil('\n', gpsbuffer, 269);
+            gpsbuffer[len] = '\0';  // Null-terminate the string
+            // Serial.println(gpsbuffer);
+
+            // Check if the received string is a GNGGA sentence
+            if (strncmp(gpsbuffer, "$GNGGA", 6) == 0) {
+
+                // Extract the time portion from the GNGGA sentence
+                if (sscanf(gpsbuffer, "$GNGGA,%6s,", time) == 1) {
+                    // Format the time as HH-MM-SS
+                    snprintf(formattedTime, sizeof(formattedTime), "%c%c-%c%c-%c%c", 
+                            time[0], time[1], time[2], time[3], time[4], time[5]);
+
+                    // Pass the formatted time to the processString function
+                    if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
+                        processString(formattedTime);
+                        xSemaphoreGive(xaccessVfdDataSemaphore);
+                    }
+                } else {
+                    Serial.println("Failed to extract time from the GPS data.");
+                }
+            }
+        }
+    }
+}
 
 /**
  * Returns the segment value to show on a display for a given character.
@@ -118,7 +180,7 @@ void loop() {
  * @return The segment value to show on the display.
  */
 uint32_t getSegmentShow(char c) {
-    switch (toupper(c)) {
+    switch (c) {
         case '0': return SEGMENT_SHOW_0;
         case '1': return SEGMENT_SHOW_1;
         case '2': return SEGMENT_SHOW_2;
@@ -144,6 +206,7 @@ uint32_t getSegmentShow(char c) {
         case 'T': return SEGMENT_SHOW_T;
         case 'U': return SEGMENT_SHOW_U;
         case 'Z': return SEGMENT_SHOW_Z;
+        case '-': return SEGMENT_SHOW_DASH;
         default:  return SEGMENT_SHOW_NONE;
     }
 }
