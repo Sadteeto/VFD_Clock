@@ -5,13 +5,18 @@
 #include <string.h>
 #include <stdlib.h>
 #include <FreeRTOS.h>
+#include <task.h>
 
 
-
+static uint8_t ubloxConfig[] = {
+    0xB5, 0x62, 0x06, 0x8A, 0x09, 0x00, 0x01, 0x01, 0x00, 0x00, 0xD9, 0x00, 0x91, 0x20, 0x01, 0x26, 0x6B
+};
 uint32_t segmentDigits[8];
 static uint32_t empty = 0b0;
 unsigned long counter = 0;
-
+// variables for timezone adjustment
+static int8_t Hours = 10;
+static int8_t Minutes = 0;
 
 static spi_transaction_t empty_screen = {
     .length = 32,         // Number of bits to transmit
@@ -81,7 +86,7 @@ void setup() {
     xTaskCreatePinnedToCore(
         vGpsTask, /* Function to implement the task */
         "gpsTask", /* Name of the task */
-        2048,  /* Stack size in words */
+        4068,  /* Stack size in words */
         NULL,  /* Task input parameter */
         2,  /* Priority of the task */
         NULL,  /* Task handle. */
@@ -113,25 +118,31 @@ void loop() {
  * @param pvParameters Pointer to task parameters (not used in this task).
  */
 void vVfdUpdateTask(void *pvParameters) {
-    uint32_t segmentDigits_local[8];
     Serial.println("vfdUpdateTask started");
+
+
+    spi_transaction_t transactions[8];
+    for (int i = 0; i < 8; i++) {
+        transactions[i] = (spi_transaction_t) {
+            .length = 32,  // Number of bits to transmit
+            .tx_buffer = &segmentDigits[i],  // Data buffer
+            .rx_buffer = NULL  // No data to be received
+        };
+    }
+
     while (1) {
         for (int i = 0; i < 8; i++) {
-            spi_transaction_t t = {
-                .length = 32,         // Number of bits to transmit
-                .tx_buffer = &segmentDigits[i],   // Data buffer
-                .rx_buffer = NULL     // No data to be received
-            };
             // take semaphore, transmit data, release semaphore
             if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
-                if (spi_device_transmit(vfdspi, &t) != ESP_OK) {
+                if (spi_device_transmit(vfdspi, &transactions[i]) != ESP_OK) {
                     Serial.println("Error");
                 }
                 xSemaphoreGive(xaccessVfdDataSemaphore);
             }
-
-            digitalWrite(VFLOAD, HIGH);
-            digitalWrite(VFLOAD, LOW);
+            // digitalWrite(VFLOAD, HIGH);
+            // digitalWrite(VFLOAD, LOW);
+            GPIO.out_w1ts = (1 << VFLOAD); // Set VFLOAD high
+            GPIO.out_w1tc = (1 << VFLOAD); // Set VFLOAD low        
         }
     }
 
@@ -146,31 +157,47 @@ void vVfdUpdateTask(void *pvParameters) {
  * 
  * @param pvParameters Pointer to task parameters (not used in this task).
  */
+
 void vGpsTask(void *pvParameters) {
     Serial.println("vGpsTask started");
-    while (1) {
-        char gpsbuffer[300] = {0};  // Initialize buffer and ensure it's zeroed out
-        char time[10];  // Buffer to hold extracted time
-        char formattedTime[9];  // Buffer to hold formatted time
+    char gpsbuffer[300] = {0};  // Initialize buffer and ensure it's zeroed out
+    char time[10];  // Buffer to hold extracted time
+    char formattedTime[9];  // Buffer to hold formatted time
+    Serial1.write(ubloxConfig, sizeof(ubloxConfig));
 
+    while (1) {
         if (Serial1.available()) {
             int len = Serial1.readBytesUntil('\n', gpsbuffer, 269);
             gpsbuffer[len] = '\0';  // Null-terminate the string
-            // Serial.println(gpsbuffer);
+            Serial.println(gpsbuffer);
 
             // Check if the received string is a GNGGA sentence
             if (strncmp(gpsbuffer, "$GNGGA", 6) == 0) {
-
                 // Extract the time portion from the GNGGA sentence
                 if (sscanf(gpsbuffer, "$GNGGA,%6s,", time) == 1) {
+                    // Convert extracted time to minutes
+                    uint8_t hour = (time[0] - '0') * 10 + (time[1] - '0');
+                    uint8_t minute = (time[2] - '0') * 10 + (time[3] - '0');
+                    uint8_t second = (time[4] - '0') * 10 + (time[5] - '0');
+
+                    // Apply timezone adjustment
+                    minute += Minutes;
+                    hour += Hours + minute / 60;
+                    minute %= 60;
+                    hour %= 24;
+
+                    // Check for negative time due to timezone going backwards
+                    if (hour < 0) hour += 24;
+                    if (minute < 0) minute += 60;
+
                     // Format the time as HH-MM-SS
-                    snprintf(formattedTime, sizeof(formattedTime), "%c%c-%c%c-%c%c", 
-                            time[0], time[1], time[2], time[3], time[4], time[5]);
+                    snprintf(formattedTime, sizeof(formattedTime), "%02d-%02d-%02d", hour, minute, second);
 
                     // Pass the formatted time to the processString function
                     if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
                         processString(formattedTime);
                         xSemaphoreGive(xaccessVfdDataSemaphore);
+                        vTaskDelay(900 / portTICK_PERIOD_MS);
                     }
                 } else {
                     Serial.println("Failed to extract time from the GPS data.");
@@ -179,7 +206,6 @@ void vGpsTask(void *pvParameters) {
         }
     }
 }
-
 
 /**
  * Returns the segment value to show on a display for a given character.
