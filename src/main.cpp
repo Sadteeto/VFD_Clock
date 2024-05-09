@@ -6,12 +6,12 @@
 #include <stdlib.h>
 #include <FreeRTOS.h>
 #include <task.h>
-
-
+#include <FreeRTOSConfig.h>
+// #define CONFIG_FREERTOS_HZ 3000
+uint32_t segDigits[8];
 static uint8_t ubloxConfig[] = {
     0xB5, 0x62, 0x06, 0x8A, 0x09, 0x00, 0x01, 0x01, 0x00, 0x00, 0xD9, 0x00, 0x91, 0x20, 0x01, 0x26, 0x6B
 };
-uint32_t segmentDigits[8];
 static uint32_t empty = 0b0;
 unsigned long counter = 0;
 // variables for timezone adjustment
@@ -27,11 +27,10 @@ static spi_transaction_t empty_screen = {
 
 spi_device_handle_t vfdspi;
 
-SemaphoreHandle_t xaccessVfdDataSemaphore = NULL;
-// SemaphoreHandle_t xspiSemaphore = NULL;
+// Queue handle for the VFD display
+QueueHandle_t xVFDQueue = NULL;
 
-// void displayDigit(uint8_t digit, uint8_t value);
-// void spi_transaction_complete(spi_transaction_t *t);
+
 
 
 
@@ -70,7 +69,7 @@ void setup() {
         .command_bits = 0,
         .address_bits = 0,
         .mode = 0,                    // SPI mode 0
-        .clock_speed_hz = SPI_MASTER_FREQ_8M, //APB_CLK_FREQ/80,  // Clock speed in Hz (10 kHz)
+        .clock_speed_hz = APB_CLK_FREQ/8, //APB_CLK_FREQ/80,  // Clock speed in Hz (10 kHz)
         .spics_io_num = -1,           // CS pin (not used in this example)
         .queue_size = 7,              // Transactions queue size
     };
@@ -80,9 +79,16 @@ void setup() {
     Serial.println("SPI configured");
 
     clearScreen();
+    // create vfd Queue
+    xVFDQueue = xQueueCreate(4,sizeof(segDigits));
 
-    xaccessVfdDataSemaphore = xSemaphoreCreateBinary();
-    xSemaphoreGive(xaccessVfdDataSemaphore);
+
+    xVFDQueue = xQueueCreate(
+        1,
+        sizeof(segDigits)
+    );
+
+
     xTaskCreatePinnedToCore(
         vGpsTask, /* Function to implement the task */
         "gpsTask", /* Name of the task */
@@ -99,7 +105,7 @@ void setup() {
         NULL,  /* Task input parameter */
         3,  /* Priority of the task */
         NULL,  /* Task handle. */
-        1); /* Core where the task should run */
+        0); /* Core where the task should run */
 }
 
 
@@ -111,15 +117,16 @@ void loop() {
 /**
  * @brief Task function for updating the VFD display.
  * 
- * This task is responsible for updating the VFD display by transmitting data through SPI.
- * It continuously loops through the segment digits and transmits the data using the SPI device.
- * It also takes a semaphore to ensure exclusive access to the VFD data and releases it after transmission.
+ * This task reads data from the queue and updates the VFD display with the received data.
+ * The task uses the SPI communication to send the data to the VFD display.
+ * If the transmission fails, the task prints an error message to the serial monitor.
+ * Finally, the task toggles the VFLOAD pin to update the display.
  * 
  * @param pvParameters Pointer to task parameters (not used in this task).
  */
 void vVfdUpdateTask(void *pvParameters) {
     Serial.println("vfdUpdateTask started");
-
+    uint32_t segmentDigits[8] = {0 ,0 ,0 ,0 ,0 ,0 ,0 ,0};
 
     spi_transaction_t transactions[8];
     for (int i = 0; i < 8; i++) {
@@ -131,33 +138,29 @@ void vVfdUpdateTask(void *pvParameters) {
     }
 
     while (1) {
+        // Wait for data from the queue, non-blocking
+        xQueueReceive(xVFDQueue, &segmentDigits, 0);
         for (int i = 0; i < 8; i++) {
-            // take semaphore, transmit data, release semaphore
-            if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
                 if (spi_device_transmit(vfdspi, &transactions[i]) != ESP_OK) {
                     Serial.println("Error");
                 }
-                xSemaphoreGive(xaccessVfdDataSemaphore);
-            }
-            // digitalWrite(VFLOAD, HIGH);
-            // digitalWrite(VFLOAD, LOW);
             GPIO.out_w1ts = (1 << VFLOAD); // Set VFLOAD high
             GPIO.out_w1tc = (1 << VFLOAD); // Set VFLOAD low        
+            
         }
     }
 
 }
 
-
 /**
- * @brief Task function for GPS data processing.
+ * @brief Task function for reading GPS data.
  * 
- * This task reads GPS data from Serial1 and extracts the time information from the GNGGA sentence.
- * The extracted time is then formatted as HH-MM-SS and passed to the processString function.
+ * This task reads GPS data from the Serial1 port and processes the data to extract the time.
+ * The task then adjusts the time based on the timezone offset and formats the time as HH-MM-SS.
+ * The formatted time is then passed to the processString function to display the time on the VFD display.
  * 
  * @param pvParameters Pointer to task parameters (not used in this task).
  */
-
 void vGpsTask(void *pvParameters) {
     Serial.println("vGpsTask started");
     char gpsbuffer[300] = {0};  // Initialize buffer and ensure it's zeroed out
@@ -192,13 +195,7 @@ void vGpsTask(void *pvParameters) {
 
                     // Format the time as HH-MM-SS
                     snprintf(formattedTime, sizeof(formattedTime), "%02d-%02d-%02d", hour, minute, second);
-
-                    // Pass the formatted time to the processString function
-                    if (xSemaphoreTake(xaccessVfdDataSemaphore, portMAX_DELAY) == pdTRUE) {
-                        processString(formattedTime);
-                        xSemaphoreGive(xaccessVfdDataSemaphore);
-                        vTaskDelay(900 / portTICK_PERIOD_MS);
-                    }
+                    processString(formattedTime);
                 } else {
                     Serial.println("Failed to extract time from the GPS data.");
                 }
@@ -267,18 +264,33 @@ void clearScreen(){
 
 
 /**
- * Processes a string and assigns segment values to each digit.
+ * Processes a string to display on the VFD display.
  *
- * @param input The input string to process.
+ * This function takes an 8-character string as input and processes it to display on the VFD display.
+ * It converts each character to the corresponding segment value using the `getSegmentShow` function.
+ * The function then sends the segment values to the VFD display using the `xQueueSend` function.
+ *
+ * @param input The 8-character string to display on the VFD display.
  */
 void processString(const char *input) {
+    uint32_t segmentDigits[8];
     if (strlen(input) != 8) {
         printf("Error: String must be exactly 8 characters long.\n");
         exit(1);
     }
-
     for (int i = 0; i < 8; i++) {
         uint32_t digitMask = 1 << (31 - i); // Create digit mask starting from DIGIT_1 to DIGIT_8
         segmentDigits[i] = getSegmentShow(input[i]) | digitMask;
     }
+
+    xQueueSend( /* The handle of the queue. */
+            xVFDQueue,
+            /* The address of the xLuxMessage variable.
+            * sizeof( struct vfd) bytes are copied from here into
+            * the queue. */
+            ( void * ) &segmentDigits,
+            /* Block time of 0 says don't block if the queue is already
+            * full.  Check the value returned by xQueueSend() to know
+            * if the message was sent to the queue successfully. */
+            ( TickType_t ) 0 );
 }
