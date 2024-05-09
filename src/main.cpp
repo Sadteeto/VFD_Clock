@@ -37,7 +37,7 @@ QueueHandle_t xVFDQueue = NULL;
 // function declarations
 uint32_t getSegmentShow(char c);
 void clearScreen(void);
-void processString(const char *input);
+// void processString(const char *input);
 void vGpsTask(void *pvParameters);
 void vVfdUpdateTask(void *pvParameters);
 
@@ -155,9 +155,10 @@ void vVfdUpdateTask(void *pvParameters) {
 /**
  * @brief Task function for reading GPS data.
  * 
- * This task reads GPS data from the Serial1 port and processes the data to extract the time.
- * The task then adjusts the time based on the timezone offset and formats the time as HH-MM-SS.
- * The formatted time is then passed to the processString function to display the time on the VFD display.
+ * This task reads GPS data from the serial port and extracts the time information from the GNGGA sentence.
+ * The task then adjusts the time based on the timezone settings and formats the time as HH-MM-SS.
+ * The formatted time is converted to segment values for displaying on the VFD display.
+ * The task sends the segment values to the VFD display update task using a queue.
  * 
  * @param pvParameters Pointer to task parameters (not used in this task).
  */
@@ -167,12 +168,13 @@ void vGpsTask(void *pvParameters) {
     char time[10];  // Buffer to hold extracted time
     char formattedTime[9];  // Buffer to hold formatted time
     Serial1.write(ubloxConfig, sizeof(ubloxConfig));
+    uint32_t segmentDigits[8];
 
     while (1) {
         if (Serial1.available()) {
             int len = Serial1.readBytesUntil('\n', gpsbuffer, 269);
             gpsbuffer[len] = '\0';  // Null-terminate the string
-            Serial.println(gpsbuffer);
+            // Serial.println(gpsbuffer);
 
             // Check if the received string is a GNGGA sentence
             if (strncmp(gpsbuffer, "$GNGGA", 6) == 0) {
@@ -195,7 +197,28 @@ void vGpsTask(void *pvParameters) {
 
                     // Format the time as HH-MM-SS
                     snprintf(formattedTime, sizeof(formattedTime), "%02d-%02d-%02d", hour, minute, second);
-                    processString(formattedTime);
+
+
+                    if (strlen(formattedTime) != 8) {
+                        printf("Error: String must be exactly 8 characters long.\n");
+                        exit(1);
+                    }
+                    for (int i = 0; i < 8; i++) {
+                        uint32_t digitMask = 1 << (31 - i); // Create digit mask starting from DIGIT_1 to DIGIT_8
+                        segmentDigits[i] = getSegmentShow(formattedTime[i]) | digitMask;
+                    }
+
+                    xQueueSend( /* The handle of the queue. */
+                            xVFDQueue,
+                            /* The address of the xLuxMessage variable.
+                            * sizeof( struct vfd) bytes are copied from here into
+                            * the queue. */
+                            ( void * ) &segmentDigits,
+                            /* Block time of 0 says don't block if the queue is already
+                            * full.  Check the value returned by xQueueSend() to know
+                            * if the message was sent to the queue successfully. */
+                            ( TickType_t ) 0 );
+                    vTaskDelay(900 / portTICK_PERIOD_MS);
                 } else {
                     Serial.println("Failed to extract time from the GPS data.");
                 }
@@ -263,34 +286,3 @@ void clearScreen(){
 }
 
 
-/**
- * Processes a string to display on the VFD display.
- *
- * This function takes an 8-character string as input and processes it to display on the VFD display.
- * It converts each character to the corresponding segment value using the `getSegmentShow` function.
- * The function then sends the segment values to the VFD display using the `xQueueSend` function.
- *
- * @param input The 8-character string to display on the VFD display.
- */
-void processString(const char *input) {
-    uint32_t segmentDigits[8];
-    if (strlen(input) != 8) {
-        printf("Error: String must be exactly 8 characters long.\n");
-        exit(1);
-    }
-    for (int i = 0; i < 8; i++) {
-        uint32_t digitMask = 1 << (31 - i); // Create digit mask starting from DIGIT_1 to DIGIT_8
-        segmentDigits[i] = getSegmentShow(input[i]) | digitMask;
-    }
-
-    xQueueSend( /* The handle of the queue. */
-            xVFDQueue,
-            /* The address of the xLuxMessage variable.
-            * sizeof( struct vfd) bytes are copied from here into
-            * the queue. */
-            ( void * ) &segmentDigits,
-            /* Block time of 0 says don't block if the queue is already
-            * full.  Check the value returned by xQueueSend() to know
-            * if the message was sent to the queue successfully. */
-            ( TickType_t ) 0 );
-}
