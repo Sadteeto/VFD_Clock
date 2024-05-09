@@ -31,18 +31,11 @@ spi_device_handle_t vfdspi;
 QueueHandle_t xVFDQueue = NULL;
 
 
-
-
-
 // function declarations
 uint32_t getSegmentShow(char c);
 void clearScreen(void);
-// void processString(const char *input);
 void vGpsTask(void *pvParameters);
 void vVfdUpdateTask(void *pvParameters);
-
-
-
 
 
 void setup() {
